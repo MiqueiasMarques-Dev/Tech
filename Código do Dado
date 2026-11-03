@@ -1,1 +1,304 @@
 
+#include <Wire.h>
+#include <math.h>
+
+// ---------------- PINOS E SENSOR ----------------
+const int LED_PIN = 12;
+const int MPU = 0x68;
+
+// Dados do acelerometro
+int16_t ax, ay, az;
+
+// Dados do giroscopio
+int16_t gx, gy, gz;
+
+// Angulos calculados
+float anguloX = 0;
+float anguloY = 0;
+float anguloZ = 0;
+
+// Controle de tempo
+unsigned long tempoAnterior = 0;
+
+// ---------------- IDENTIFICACAO DAS FACES ----------------
+int eixoInicial = 0;
+int sinalInicial = 1;
+
+int ladoCandidato = 0;
+int ladoConfirmado = 0;
+int leiturasEstaveis = 0;
+
+const int LEITURAS_PARA_CONFIRMAR = 5;
+
+// ---------------- CONTROLE DO LED ----------------
+bool faceEstaConfirmada = false;
+bool estadoLED = false;
+
+unsigned long tempoLED = 0;
+const unsigned long INTERVALO_PISCADA = 250;
+
+// --------------------------------------------------
+// CONFIGURA O MPU6050
+// --------------------------------------------------
+void configurarMPU() {
+  // Acorda o sensor
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // Giroscopio: +/- 250 graus por segundo
+  Wire.beginTransmission(MPU);
+  Wire.write(0x1B);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  // Acelerometro: +/- 2g
+  Wire.beginTransmission(MPU);
+  Wire.write(0x1C);
+  Wire.write(0x00);
+  Wire.endTransmission();
+
+  delay(100);
+}
+
+// --------------------------------------------------
+// LE OS DADOS DO MPU6050
+// --------------------------------------------------
+bool lerMPU() {
+  Wire.beginTransmission(MPU);
+  Wire.write(0x3B);
+
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  int quantidade = Wire.requestFrom(MPU, 14, true);
+
+  if (quantidade != 14) {
+    return false;
+  }
+
+  ax = (Wire.read() << 8) | Wire.read();
+  ay = (Wire.read() << 8) | Wire.read();
+  az = (Wire.read() << 8) | Wire.read();
+
+  // Ignora a temperatura
+  Wire.read();
+  Wire.read();
+
+  gx = (Wire.read() << 8) | Wire.read();
+  gy = (Wire.read() << 8) | Wire.read();
+  gz = (Wire.read() << 8) | Wire.read();
+
+  return true;
+}
+
+// --------------------------------------------------
+// IDENTIFICA A FACE SUPERIOR
+// Retorna 0 quando a orientacao e indefinida
+// --------------------------------------------------
+int identificarLado() {
+  float intensidade = sqrt(
+    (float)ax * ax +
+    (float)ay * ay +
+    (float)az * az
+  );
+
+  // Detecta aceleracao fora da faixa esperada
+  if (intensidade < 12000 || intensidade > 22000) {
+    return 0;
+  }
+
+  int eixoAtual;
+  int valorDominante;
+
+  if (abs(ax) >= abs(ay) && abs(ax) >= abs(az)) {
+    eixoAtual = 1;
+    valorDominante = ax;
+  } else if (abs(ay) >= abs(ax) && abs(ay) >= abs(az)) {
+    eixoAtual = 2;
+    valorDominante = ay;
+  } else {
+    eixoAtual = 3;
+    valorDominante = az;
+  }
+
+  int maior = max(abs(ax), max(abs(ay), abs(az)));
+  int segundoMaior;
+
+  if (eixoAtual == 1) {
+    segundoMaior = max(abs(ay), abs(az));
+  } else if (eixoAtual == 2) {
+    segundoMaior = max(abs(ax), abs(az));
+  } else {
+    segundoMaior = max(abs(ax), abs(ay));
+  }
+
+  // Evita decidir entre dois eixos muito semelhantes
+  if (maior < 14000 || maior - segundoMaior < 3000) {
+    return 0;
+  }
+
+  int sinalAtual = (valorDominante >= 0) ? 1 : -1;
+
+  // Registra a orientacao inicial como face 1
+  if (eixoInicial == 0) {
+    eixoInicial = eixoAtual;
+    sinalInicial = sinalAtual;
+    return 1;
+  }
+
+  // Mesmo eixo e mesmo sentido
+  if (eixoAtual == eixoInicial && sinalAtual == sinalInicial) {
+    return 1;
+  }
+
+  // Mesmo eixo e sentido oposto
+  if (eixoAtual == eixoInicial && sinalAtual != sinalInicial) {
+    return 6;
+  }
+
+  // Mapeamento provisório das demais faces
+  if (eixoAtual == 1) {
+    return (sinalAtual == sinalInicial) ? 2 : 5;
+  }
+
+  if (eixoAtual == 2) {
+    return (sinalAtual == sinalInicial) ? 3 : 4;
+  }
+
+  return 0;
+}
+
+// --------------------------------------------------
+// ATUALIZA O LED
+// Pisca se nao houver face confirmada.
+// Fica aceso continuamente se houver confirmacao.
+// --------------------------------------------------
+void atualizarLED() {
+  if (faceEstaConfirmada) {
+    digitalWrite(LED_PIN, HIGH);
+    estadoLED = true;
+  } else {
+    unsigned long agora = millis();
+
+    if (agora - tempoLED >= INTERVALO_PISCADA) {
+      tempoLED = agora;
+      estadoLED = !estadoLED;
+      digitalWrite(LED_PIN, estadoLED ? HIGH : LOW);
+    }
+  }
+}
+
+// --------------------------------------------------
+// INICIALIZACAO
+// --------------------------------------------------
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  Serial.begin(9600);
+  Wire.begin();
+
+  configurarMPU();
+
+  Serial.println("Dado eletronico iniciado!");
+  Serial.println("LED piscando: aguardando confirmacao.");
+  Serial.println("LED aceso: face confirmada.");
+
+  tempoAnterior = micros();
+}
+
+// --------------------------------------------------
+// LOOP PRINCIPAL
+// --------------------------------------------------
+void loop() {
+  if (!lerMPU()) {
+    faceEstaConfirmada = false;
+    atualizarLED();
+
+    Serial.println("Erro de comunicacao com o MPU6050!");
+    delay(100);
+    return;
+  }
+
+  // Calcula os angulos de inclinacao
+  anguloX = atan2((float)ay, (float)az) * 180.0 / PI;
+
+  anguloY = atan2(
+    -(float)ax,
+    sqrt((float)ay * ay + (float)az * az)
+  ) * 180.0 / PI;
+
+  // Estimativa do angulo Z pelo giroscopio
+  unsigned long tempoAtual = micros();
+  float dt = (tempoAtual - tempoAnterior) / 1000000.0;
+  tempoAnterior = tempoAtual;
+
+  anguloZ += ((float)gz / 131.0) * dt;
+
+  // Identifica a face
+  int lado = identificarLado();
+
+  if (lado == 0) {
+    // Sensor em movimento ou orientacao indefinida
+    leiturasEstaveis = 0;
+    ladoCandidato = 0;
+    faceEstaConfirmada = false;
+  } else {
+    // Conta leituras consecutivas da mesma face
+    if (lado == ladoCandidato) {
+      leiturasEstaveis++;
+    } else {
+      ladoCandidato = lado;
+      leiturasEstaveis = 1;
+    }
+
+    if (leiturasEstaveis >= LEITURAS_PARA_CONFIRMAR) {
+      ladoConfirmado = ladoCandidato;
+      faceEstaConfirmada = true;
+    } else {
+      // Uma face diferente ainda esta sendo verificada
+      if (ladoCandidato != ladoConfirmado) {
+        faceEstaConfirmada = false;
+      }
+
+      // Na inicializacao, nenhuma face foi confirmada ainda
+      if (ladoConfirmado == 0) {
+        faceEstaConfirmada = false;
+      }
+    }
+  }
+
+  // Atualiza o LED em todas as iteracoes
+  atualizarLED();
+
+  // Exibe os dados no Monitor Serial
+  Serial.print("X: ");
+  Serial.print(anguloX, 1);
+
+  Serial.print(" | Y: ");
+  Serial.print(anguloY, 1);
+
+  Serial.print(" | Z: ");
+  Serial.print(anguloZ, 1);
+
+  Serial.print(" | Lado: ");
+
+  if (lado == 0) {
+    Serial.print("Girando ou orientacao indefinida");
+  } else if (!faceEstaConfirmada) {
+    Serial.print("Aguardando confirmacao");
+    Serial.print(" | Candidato: ");
+    Serial.print(ladoCandidato);
+  } else {
+    Serial.print(ladoConfirmado);
+    Serial.print(" (confirmado)");
+  }
+
+  Serial.println();
+
+  delay(100);
+}
+
