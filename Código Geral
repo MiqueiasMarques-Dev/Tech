@@ -1,1 +1,176 @@
-#BIOTECH
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// Configuração do Ponto de Acesso
+const char *ssid = "ERINALDO";
+const char *password = "familiaebn2020";
+
+ESP8266WebServer server(80);
+
+// --- CONFIGURAÇÃO DO SEU CIRCUITO ---
+#define RST_PIN   D3   // Fio Roxo no pino D3
+#define SS_PIN    D4   // Fio Cinza no pino D4
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// UID do cartão alvo
+const String UID_ALVO = "04 9C E7 7C D4 2A 81";
+
+int statusVideo = 0; 
+unsigned long tempoAtivacao = 0;
+const long duracaoPlay = 8000; // Tempo que o vídeo fica visível (8 segundos)
+
+// Código HTML com Player do Google Drive Embutido (Iframe)
+const char HTML_PAGINA[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player RFID - Google Drive</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; background-color: #222; color: white; padding: 20px; }
+        .container { max-width: 700px; margin: auto; background: #333; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        #status-alerta { display: none; color: #28a745; font-weight: bold; margin-bottom: 15px; font-size: 18px; }
+        
+        /* Esconde o vídeo por padrão e só mostra quando o cartão for lido */
+        .video-wrapper { 
+            display: none; 
+            position: relative; 
+            padding-bottom: 56.25%; /* Proporção 16:9 */
+            height: 0; 
+            overflow: hidden; 
+            border-radius: 8px;
+            background: #000;
+        }
+        .video-wrapper iframe { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            border: 0; 
+        }
+        .instrucao { color: #ffc107; font-size: 16px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h2>Sistema de Vídeo por RFID</h2>
+        <div id="instrucao-inicial" class="instrucao">Aproxime o cartão RFID para assistir ao vídeo...</div>
+        
+        <div id="status-alerta">🏠 Cartão Lido! Carregando vídeo do Google Drive...</div>
+        
+        <div id="player-container" class="video-wrapper">
+            <!-- ATENÇÃO: Substitua o ID abaixo (após /file/d/ e antes de /preview) pelo ID do seu vídeo do Drive -->
+            <iframe id="player-drive" src="https://drive.google.com/file/d/11oQxc_qELMacdg9VfH591j1w__n6F6Zk/preview" allow="autoplay"></iframe>
+        </div>
+    </div>
+
+    <script>
+        const containerVideo = document.getElementById('player-container');
+        const statusAlerta = document.getElementById('status-alerta');
+        const instrucaoInicial = document.getElementById('instrucao-inicial');
+        const iframe = document.getElementById('player-drive');
+
+        // Monitora o estado do ESP8266 a cada 300ms
+        setInterval(function() {
+            fetch('/status')
+                .then(response => response.text())
+                .then(status => {
+                    if (status === "1") {
+                        statusAlerta.style.display = 'block';
+                        instrucaoInicial.style.display = 'none';
+                        containerVideo.style.display = 'block';
+                    } else {
+                        statusAlerta.style.display = 'none';
+                        instrucaoInicial.style.display = 'block';
+                        containerVideo.style.display = 'none';
+                        
+                        // Recarrega o iframe para pausar/resetar o vídeo quando o tempo acabar
+                        const srcAtual = iframe.src;
+                        iframe.src = '';
+                        iframe.src = srcAtual;
+                    }
+                });
+        }, 300); 
+    </script>
+
+</body>
+</html>
+)rawliteral";
+
+void enviarHTML() {
+    server.send(200, "text/html", HTML_PAGINA);
+}
+
+void tratarStatus() {
+    server.send(200, "text/plain", String(statusVideo));
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000); 
+    
+    Serial.println(F("\n--- INICIALIZANDO SISTEMA ---"));
+
+    SPI.begin();           
+    mfrc522.PCD_Init();    
+
+    Serial.print(F("Status do Leitor RFID: "));
+    mfrc522.PCD_DumpVersionToSerial();
+
+    // Procure por WiFi.softAP(ssid, password); e mude para:
+    WiFi.begin(ssid, password);
+    Serial.print("Conectando ao WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+     delay(500);
+     Serial.print(".");
+}
+Serial.println("\n--- WiFi Conectado ---");
+Serial.print("Acesse no PC pelo IP: ");
+Serial.println(WiFi.localIP()); // Use este IP que vai aparecer no Monitor Serial para abrir o site
+
+
+    server.on("/", enviarHTML);
+    server.on("/status", tratarStatus);
+
+    server.begin();
+    Serial.println("Pronto para ler tags RFID...");
+}
+
+void loop() {
+    server.handleClient();
+
+    // Desliga o play após o tempo programado
+    if (statusVideo == 1 && (millis() - tempoAtivacao >= duracaoPlay)) {
+        statusVideo = 0;
+        Serial.println("[RFID] Tempo esgotado. Vídeo ocultado.");
+    }
+
+    if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) {
+        return;
+    }
+
+    String uidLida = "";
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+        uidLida += (mfrc522.uid.uidByte[i] < 0x10 ? "0" : "");
+        uidLida += String(mfrc522.uid.uidByte[i], HEX);
+        if (i < mfrc522.uid.size - 1) uidLida += " ";
+    }
+    uidLida.toUpperCase();
+
+    Serial.print("Tag detectada UID: ");
+    Serial.println(uidLida);
+
+    if (uidLida == UID_ALVO) {
+        statusVideo = 1;
+        tempoAtivacao = millis(); 
+        Serial.println("Cartão CORRETO! Mostrando vídeo do Drive.");
+    }
+
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
+}
